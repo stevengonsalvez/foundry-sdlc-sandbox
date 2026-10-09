@@ -21,10 +21,10 @@ jobs:
           EP: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
         run: |
           TOKEN=$(az account get-access-token --resource https://ai.azure.com --query accessToken -o tsv)
-          curl -sS -o body.txt -w 'status=%{http_code}\n' -X POST "$EP/openai/v1/responses" \
+          curl -sS -D hdr.txt -o body.txt -w 'status=%{http_code}\n' -X POST "$EP/openai/v1/responses" \
             -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
             -d '{"input":"say pong","max_output_tokens":200,"extra_body":null,"agent_reference":{"type":"agent_reference","name":"sdlc-release-notes"}}'
-          cat body.txt | head -c 1500; echo
+          cat hdr.txt | grep -i -E "^(HTTP|x-ms|www-auth|apim|x-request)" | head -8; cat body.txt | head -c 1500; echo
           echo '--- list agents'
           curl -sS -o body2.txt -w 'status=%{http_code}\n' "$EP/agents?api-version=v1" -H "Authorization: Bearer $TOKEN"
           head -c 600 body2.txt
