@@ -33,41 +33,26 @@ from azure.ai.projects.models import (
     Reasoning,
     TextResponseFormatJsonSchema,
 )
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import AzureError, ResourceNotFoundError
 from azure.identity import DefaultAzureCredential
 
-from sdlc_agents.definitions import (
-    AGENTS,
-    CODEGEN_SCHEMA,
-    MODEL_DEPLOYMENT,
-    TRIAGE_SCHEMA,
-)
-
-# Per-agent JSON schemas; None means text output (markdown agents).
-_SCHEMAS: dict[str, dict | None] = {
-    "sdlc-triage": TRIAGE_SCHEMA,
-    "sdlc-codegen": CODEGEN_SCHEMA,
-    "sdlc-review": None,
-    "sdlc-ci-triage": None,
-    "sdlc-release-notes": None,
-}
+from sdlc_agents.definitions import AGENTS, MODEL_DEPLOYMENT, AgentDef
 
 
-def _build_definition(name: str, instructions: str) -> PromptAgentDefinition:
-    """Build a PromptAgentDefinition with reasoning=low and optional JSON schema."""
-    schema = _SCHEMAS.get(name)
+def _build_definition(agent: AgentDef) -> PromptAgentDefinition:
+    """Build a PromptAgentDefinition with reasoning=low and the agent's JSON schema, if any."""
     text = None
-    if schema is not None:
+    if agent.schema is not None:
         text = PromptAgentDefinitionTextOptions(
             format=TextResponseFormatJsonSchema(
                 name="output",
-                schema=schema,
+                schema=agent.schema,
                 strict=True,
             )
         )
     return PromptAgentDefinition(
         model=MODEL_DEPLOYMENT,
-        instructions=instructions,
+        instructions=agent.instructions,
         reasoning=Reasoning(effort="low"),
         text=text,
     )
@@ -127,10 +112,12 @@ def main() -> None:
         errors: list[str] = []
         for agent in AGENTS:
             try:
-                definition = _build_definition(agent.name, agent.instructions)
+                definition = _build_definition(agent)
                 version, action = _ensure_version(client, agent.name, definition)
                 print(f"{agent.name}  version={version}  {action}")
-            except Exception as exc:  # noqa: BLE001
+            except AzureError as exc:
+                # Service and credential errors: report and try the remaining agents.
+                # Anything else is a bug and propagates with its traceback.
                 msg = f"ERROR registering {agent.name}: {exc}"
                 print(msg, file=sys.stderr)
                 errors.append(msg)

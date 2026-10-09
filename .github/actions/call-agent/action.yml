@@ -1,0 +1,49 @@
+name: Call SDLC agent
+description: >
+  Set up Python, install the hash-pinned agent dependencies and run
+  `python -m sdlc_agents.call` from tools/. The caller checks out the repo, runs
+  azure/login (OIDC needs id-token on the job) and sets FOUNDRY_PROJECT_ENDPOINT in the
+  step env.
+
+inputs:
+  agent:
+    description: Agent name, e.g. sdlc-triage
+    required: true
+  input-file:
+    description: Prompt file to send
+    required: true
+  output-file:
+    description: File that receives the agent's answer (stdout of the CLI)
+    required: true
+  max-output-tokens:
+    description: Output token cap; empty uses the CLI's per-agent default
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: requirements-agents.txt
+
+    - name: Install agent dependencies (hash-pinned)
+      shell: bash -euo pipefail {0}
+      run: python -m pip install --require-hashes --no-deps -r requirements-agents.txt
+
+    - name: Invoke ${{ inputs.agent }}
+      shell: bash -euo pipefail {0}
+      env:
+        PYTHONPATH: ${{ github.workspace }}/tools
+        AGENT: ${{ inputs.agent }}
+        INPUT_FILE: ${{ inputs.input-file }}
+        OUTPUT_FILE: ${{ inputs.output-file }}
+        MAX_OUTPUT_TOKENS: ${{ inputs.max-output-tokens }}
+      run: |
+        args=(--agent "$AGENT" --input-file "$INPUT_FILE")
+        if [ -n "$MAX_OUTPUT_TOKENS" ]; then
+          args+=(--max-output-tokens "$MAX_OUTPUT_TOKENS")
+        fi
+        python -m sdlc_agents.call "${args[@]}" > "$OUTPUT_FILE"

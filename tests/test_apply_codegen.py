@@ -1,15 +1,21 @@
-"""Tests for scripts/apply_codegen.py."""
+"""Tests for scripts/apply_codegen.py (tools/ is on sys.path via pyproject pythonpath)."""
 
 import json
 import os
+import pathlib
+import shutil
+import subprocess
 import sys
-import tempfile
 
 import pytest
 
+from sdlc_agents import codegen_policy
+
 # Allow importing from scripts/ without a package install
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-from apply_codegen import load_and_validate, apply_files, main, ALLOWED_ROOTS  # noqa: E402
+SANDBOX = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SANDBOX / "scripts"))
+import apply_codegen  # noqa: E402
+from apply_codegen import load_and_validate, apply_files, main, write_manifest  # noqa: E402
 
 
 def _write_json(tmp_path, data):
@@ -44,8 +50,8 @@ class TestLoadAndValidate:
         files = load_and_validate(_write_json(tmp_path, data), str(tmp_path))
         assert len(files) == 20
 
-    def test_exact_200kb_allowed(self, tmp_path):
-        exact = "x" * (200 * 1024)
+    def test_content_at_the_byte_limit_allowed(self, tmp_path):
+        exact = "x" * codegen_policy.MAX_CONTENT_BYTES
         data = {"files": [{"path": "src/big.txt", "content": exact}]}
         files = load_and_validate(_write_json(tmp_path, data), str(tmp_path))
         assert len(files) == 1
@@ -58,7 +64,7 @@ class TestLoadAndValidate:
             load_and_validate(_write_json(tmp_path, data), str(tmp_path))
 
     def test_file_too_large(self, tmp_path):
-        big = "x" * (200 * 1024 + 1)
+        big = "x" * (codegen_policy.MAX_CONTENT_BYTES + 1)
         data = {"files": [{"path": "src/big.txt", "content": big}]}
         with pytest.raises(ValueError, match="exceeds limit"):
             load_and_validate(_write_json(tmp_path, data), str(tmp_path))
@@ -103,7 +109,7 @@ class TestLoadAndValidate:
 
     def test_absolute_path_rejected(self, tmp_path):
         data = {"files": [{"path": "/etc/passwd", "content": ""}]}
-        with pytest.raises(ValueError, match="Absolute path"):
+        with pytest.raises(ValueError, match="absolute path"):
             load_and_validate(_write_json(tmp_path, data), str(tmp_path))
 
     def test_traversal_rejected(self, tmp_path):
@@ -214,20 +220,28 @@ class TestMain:
         assert main([]) == 1
         assert "Usage" in capsys.readouterr().err
 
-    def test_missing_file_returns_1(self, capsys):
-        assert main(["/nonexistent/codegen.json"]) == 1
+    def test_missing_manifest_argument_returns_1(self, tmp_path, capsys):
+        assert main([str(tmp_path / "codegen.json")]) == 1
+        assert "Usage" in capsys.readouterr().err
+
+    def test_missing_file_returns_1(self, tmp_path, capsys):
+        manifest = tmp_path / "written.nul"
+        assert main(["/nonexistent/codegen.json", str(manifest)]) == 1
+        assert not manifest.exists()
 
     def test_invalid_json_returns_1(self, tmp_path, capsys):
         p = tmp_path / "bad.json"
         p.write_text("not json")
-        assert main([str(p)]) == 1
+        assert main([str(p), str(tmp_path / "written.nul")]) == 1
         assert "ERROR" in capsys.readouterr().err
 
-    def test_rejected_path_returns_1(self, tmp_path, capsys):
+    def test_rejected_path_returns_1_and_writes_no_manifest(self, tmp_path, capsys):
         data = {"files": [{"path": ".git/config", "content": "bad"}]}
         p = tmp_path / "codegen.json"
         p.write_text(json.dumps(data))
-        assert main([str(p)]) == 1
+        manifest = tmp_path / "written.nul"
+        assert main([str(p), str(manifest)]) == 1
+        assert not manifest.exists()
 
     def test_valid_src_input_applies_and_returns_0(self, tmp_path, capsys):
         data = {"explanation": "x", "files": [{"path": "src/out.py", "content": "# ok"}]}
@@ -242,8 +256,8 @@ class TestMain:
         assert written == ["src/out.py"]
 
 
-# Same corpus lives in agents/tests/test_call.py (sdlc_agents.call.normalise_path).
-# Both guards must give the same verdict and the same normalised form.
+# Same corpus lives in agents/tests/test_call.py; here it runs against the vendored copy
+# that apply_codegen imports.
 PATH_CORPUS = [
     ("src/foo.py", "src/foo.py"),
     ("./src/foo.py", "src/foo.py"),
@@ -298,6 +312,11 @@ PATH_CORPUS = [
     ("scripts/refresh_knowledge.py", None),
     ("src/" + "a" * 300, None),
 ]
+
+
+def test_apply_codegen_uses_the_shared_policy():
+    assert apply_codegen.normalise_path is codegen_policy.normalise_path
+    assert apply_codegen.MAX_FILES == codegen_policy.MAX_FILES
 
 
 @pytest.mark.parametrize("raw,expected", PATH_CORPUS)
@@ -449,3 +468,34 @@ class TestApplyFilesPreflight:
         with pytest.raises(ValueError, match="also under it"):
             apply_files(files, root=str(tmp_path))
         assert not (tmp_path / "src").exists()
+
+
+class TestManifest:
+    def test_write_manifest_is_nul_separated(self, tmp_path):
+        manifest = tmp_path / "written.nul"
+        write_manifest(["src/a.py", "docs/b c.md"], str(manifest))
+        assert manifest.read_bytes() == b"src/a.py\0docs/b c.md\0"
+
+    def test_cli_end_to_end_writes_files_and_manifest(self, tmp_path):
+        """Run the real script from a throw-away repo laid out like the sandbox."""
+        repo = tmp_path / "repo"
+        (repo / "scripts").mkdir(parents=True)
+        shutil.copy(SANDBOX / "scripts" / "apply_codegen.py", repo / "scripts")
+        shutil.copytree(SANDBOX / "tools", repo / "tools",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        data = {"explanation": "x", "files": [
+            {"path": "./src//pkg/new.py", "content": "x = 1\n"},
+            {"path": "docs/a*.md", "content": "glob-looking but literal\n"},
+        ]}
+        json_path = _write_json(tmp_path, data)
+        manifest = tmp_path / "written.nul"
+
+        r = subprocess.run(
+            [sys.executable, "scripts/apply_codegen.py", json_path, str(manifest)],
+            cwd=repo, env={**os.environ, "PYTHONPATH": "tools"},
+            capture_output=True, text=True, timeout=60,
+        )
+
+        assert r.returncode == 0, r.stderr
+        assert manifest.read_bytes() == b"src/pkg/new.py\0docs/a*.md\0"
+        assert (repo / "src" / "pkg" / "new.py").read_text() == "x = 1\n"

@@ -29,8 +29,15 @@ Azure Foundry prompt agent --> gpt-5-mini GlobalStandard
 The agents act on `parcelkit` (src layout under `src/parcelkit/`), a synthetic UK
 postcode and tracking-number library with intentional small gaps for demo purposes.
 
-Agents are invoked via `PYTHONPATH=tools python -m sdlc_agents.call` (the shared CLI
-from `agents/sdlc_agents/` in the infrastructure repo, copied into `tools/` at publish time).
+Every agent workflow calls the agent through one composite action,
+`.github/actions/call-agent` (inputs `agent`, `input-file`, `output-file`, `max-output-tokens`).
+It sets up Python with a pip cache, installs the hash-pinned `requirements-agents.txt`, and
+runs `python -m sdlc_agents.call` from `tools/`. Azure login stays in each workflow, because
+OIDC needs `id-token: write` on the job.
+
+`tools/sdlc_agents` is a committed copy of `agents/sdlc_agents` from the infrastructure repo.
+Do not edit it here: change the infrastructure repo, run `scripts/sync-sandbox.sh` there (its
+tests fail while the copy is stale), then publish `sandbox/` to this repo.
 
 ---
 
@@ -103,7 +110,13 @@ gh api repos/OWNER/REPO --jq '.owner.id, .id'
 Create the five agent versions in the Foundry project once, from a machine logged in with
 `az login`: `FOUNDRY_PROJECT_ENDPOINT=<endpoint> python -m sdlc_agents.create_agents`
 (run from `agents/` in the infrastructure repo). CI only calls the agents, it does not
-create them. `agents/sdlc_agents/` is copied into `tools/` before publishing this repo.
+create them.
+
+### 8. Create the triage labels
+
+`agent-triage` applies labels from the `sdlc-triage` allow-list in
+`tools/sdlc_agents/definitions.py`. GitHub's default labels cover all but `needs-info`;
+create it once: `gh label create needs-info --repo OWNER/REPO`.
 
 ---
 
@@ -126,8 +139,9 @@ create them. `agents/sdlc_agents/` is copied into `tools/` before publishing thi
 2. The `agent-implement.yml` workflow fires:
    - **generate** job: calls `sdlc-codegen` with Azure OIDC; uploads the JSON artifact.
    - **publish** job: validates again with `scripts/apply_codegen.py` (allow-list enforced),
-     commits only the written files (no `git add -A`), pushes branch `agent/issue-N`,
-     opens a **draft** PR.
+     stages exactly the paths in the manifest it writes (no `git add -A`), pushes branch
+     `agent/issue-N` and opens a **draft** PR. If the generated files match `main`, it comments
+     on the issue instead and pushes nothing.
 3. The draft PR gets no CI or review until the owner closes and reopens it (or pushes a commit).
 
 ### Stage 3: PR review
@@ -177,13 +191,15 @@ create them. `agents/sdlc_agents/` is copied into `tools/` before publishing thi
 - **Untrusted text never interpolated inline.** Issue titles/bodies, PR titles, branch
   names, and log output go through `env:` into Python files, never with `${{ }}` inside
   `run:` blocks.
-- **Selective git staging.** `agent-implement.yml` stages only the paths reported by
-  `apply_codegen.py`, never `git add -A`. Git hooks and fsmonitor are disabled during commit.
+- **Selective git staging.** `agent-implement.yml` stages only the paths in the NUL-separated
+  manifest from `apply_codegen.py`, as literal pathspecs, never `git add -A`. Git hooks and
+  fsmonitor are disabled during commit.
 - **Timeouts.** Every job has `timeout-minutes: 10`.
 - **Output caps.** Every agent call uses `--max-output-tokens 8000` (16000 for codegen).
   Diff and log inputs are also capped before being sent.
-- **Actions SHA-pinned.** All third-party actions are pinned to full commit SHAs with
-  the corresponding tag as a comment.
+- **Actions SHA-pinned, dependencies hash-pinned.** All third-party actions are pinned to full
+  commit SHAs with the corresponding tag as a comment. The agent CLI's Python dependencies
+  install from `requirements-agents.txt` with `--require-hashes`.
 - **CI on agent PRs needs a human.** Events created with `GITHUB_TOKEN` do not start new workflow
   runs, so a PR opened by `agent-implement` gets no CI or agent review until the owner closes and
   reopens it (or pushes a commit). Verify once live.

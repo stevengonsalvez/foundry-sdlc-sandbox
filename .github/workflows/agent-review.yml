@@ -48,13 +48,6 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      - name: Install sdlc_agents dependencies
-        run: pip install "azure-ai-projects==2.8.0" "azure-identity==1.23.0"
-
       - name: Collect diff (capped at 12 KB)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -71,7 +64,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          python - <<'PYEOF'
+          python3 - <<'PYEOF'
           import os
           pr_title = os.environ.get("PR_TITLE", "")[:300]
           pr_number = os.environ.get("PR_NUMBER", "")
@@ -83,15 +76,14 @@ jobs:
           PYEOF
 
       - name: Invoke sdlc-review agent
+        uses: ./.github/actions/call-agent
         env:
           FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
-          PYTHONPATH: tools
-        run: |
-          python -m sdlc_agents.call \
-            --agent sdlc-review \
-            --input-file "$RUNNER_TEMP/prompt.txt" \
-            --max-output-tokens 8000 \
-            > "$RUNNER_TEMP/review_output.md"
+        with:
+          agent: sdlc-review
+          input-file: ${{ runner.temp }}/prompt.txt
+          output-file: ${{ runner.temp }}/review_output.md
+          max-output-tokens: "8000"
 
       - name: Post review comment
         env:
