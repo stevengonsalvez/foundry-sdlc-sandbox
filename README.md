@@ -30,7 +30,7 @@ The agents act on `parcelkit` (src layout under `src/parcelkit/`), a synthetic U
 postcode and tracking-number library with intentional small gaps for demo purposes.
 
 Agents are invoked via `PYTHONPATH=tools python -m sdlc_agents.call` (the shared CLI
-from the orchestrator's `agents/sdlc_agents/` tree, copied into `tools/` at publish time).
+from `agents/sdlc_agents/` in the infrastructure repo, copied into `tools/` at publish time).
 
 ---
 
@@ -100,9 +100,10 @@ gh api repos/OWNER/REPO --jq '.owner.id, .id'
 
 ### 7. Register Foundry prompt agents
 
-Run the `register-agents` workflow (in the **orchestrator** repo, not this one) once via
-`workflow_dispatch` to create the five agent versions in the Foundry project. The
-orchestrator copies `agents/sdlc_agents/` into `tools/` before publishing this repo.
+Create the five agent versions in the Foundry project once, from a machine logged in with
+`az login`: `FOUNDRY_PROJECT_ENDPOINT=<endpoint> python -m sdlc_agents.create_agents`
+(run from `agents/` in the infrastructure repo). CI only calls the agents, it does not
+create them. `agents/sdlc_agents/` is copied into `tools/` before publishing this repo.
 
 ---
 
