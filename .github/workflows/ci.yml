@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    # Push CI runs only on main to avoid double-triggering with pull_request
+    # (same-repo PR branches would otherwise fire both push and pull_request CI,
+    # which doubles agent-ci-triage calls on failure).
+    branches: [main]
+  pull_request:
+    branches: ["**"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+permissions: {}
+
+jobs:
+  tests:
+    # Exclude fork PRs from running arbitrary code on the runner without approval.
+    # Repo setting "Require approval for all external contributors" is the primary
+    # control; this if-guard is defence-in-depth at the job level.
+    if: >
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: "false"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install parcelkit
+        run: pip install -e ".[dev]"
+
+      - name: Run pytest
+        run: python -m pytest tests/ -v

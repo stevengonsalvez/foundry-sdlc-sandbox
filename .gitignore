@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+*.egg
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Agent scratch files (written to $RUNNER_TEMP in CI; guard for local runs)
+codegen_output.json
+triage_output.json
+review_output.md
+ci_triage_output.md
+release_notes.md
+prompt.txt
+ci_logs.txt
+apply_output.txt
+written_paths.txt
+release_context.txt
+pr_list.txt

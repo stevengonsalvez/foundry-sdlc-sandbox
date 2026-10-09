@@ -1,0 +1,165 @@
+name: Agent implement
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: agent-implement-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+permissions: {}
+
+jobs:
+  # Job 1: call Azure, produce codegen JSON, upload as artifact.
+  # Holds id-token:write and contents:read only. persist-credentials:false.
+  generate:
+    if: >
+      github.actor == github.repository_owner &&
+      github.event.issue.user.login == github.repository_owner &&
+      github.event.label.name == 'agent:implement'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: "false"
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install sdlc_agents dependencies
+        run: pip install "azure-ai-projects==2.8.0" "azure-identity==1.23.0"
+
+      - name: Build prompt file
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          # Untrusted text goes via env vars into the prompt file, never inline in run:.
+          python - <<'PYEOF'
+          import os
+          title = os.environ.get("ISSUE_TITLE", "")[:500]
+          body = os.environ.get("ISSUE_BODY", "")[:3000]
+          issue_num = os.environ.get("ISSUE_NUMBER", "")
+          prompt = f"Issue #{issue_num}: {title}\n\n{body}"
+          with open(f"{os.environ['RUNNER_TEMP']}/prompt.txt", "w", encoding="utf-8") as fh:
+              fh.write(prompt)
+          PYEOF
+
+      - name: Invoke sdlc-codegen agent
+        env:
+          FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
+          PYTHONPATH: tools
+        run: |
+          python -m sdlc_agents.call \
+            --agent sdlc-codegen \
+            --input-file "$RUNNER_TEMP/prompt.txt" \
+            --max-output-tokens 16000 \
+            > "$RUNNER_TEMP/codegen_output.json"
+
+      - name: Validate codegen JSON structure
+        run: |
+          jq -e '(.explanation|type=="string") and (.files|type=="array")' \
+            "$RUNNER_TEMP/codegen_output.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codegen-${{ github.event.issue.number }}
+          path: ${{ runner.temp }}/codegen_output.json
+          retention-days: 1
+
+  # Job 2: no Azure access. Downloads artifact, validates again, commits only the
+  # paths reported by apply_codegen.py, never git add -A, never commits the JSON.
+  publish:
+    needs: generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: codegen-${{ github.event.issue.number }}
+          path: ${{ runner.temp }}
+
+      - name: Validate and apply files (re-validates in publish job)
+        id: apply
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          # apply_codegen.py validates again; exits non-zero on any violation.
+          python scripts/apply_codegen.py "$RUNNER_TEMP/codegen_output.json" \
+            2>&1 | tee apply_output.txt
+          # Capture the list of written paths for selective git staging.
+          grep -E '^ +wrote ' apply_output.txt | sed -E 's/^ +wrote //' > written_paths.txt
+          echo "Written paths:"
+          cat written_paths.txt
+
+      - name: Commit and push branch
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          BRANCH="agent/issue-${ISSUE_NUMBER}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+          # Stage ONLY the paths reported by apply_codegen; never git add -A.
+          # Disable hooks and fsmonitor so applied files cannot execute code.
+          while IFS= read -r path; do
+            [ -n "$path" ] && git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+              add -- "$path"
+          done < written_paths.txt
+
+          git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+            diff --cached --quiet || \
+            git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+              commit -m "feat: agent codegen for issue #${ISSUE_NUMBER}"
+
+          git push origin "$BRANCH" --force-with-lease || git push origin "$BRANCH" --force
+
+      - name: Open or update draft PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          BRANCH="agent/issue-${ISSUE_NUMBER}"
+          EXPLANATION=$(jq -r '.explanation // ""' "$RUNNER_TEMP/codegen_output.json" | head -c 1000)
+          PR_BODY=$(printf 'Closes #%s\n\nAgent explanation:\n%s\n\n> [!NOTE]\n> Opened by sdlc-codegen. CI and review start only after the owner closes and reopens this PR. Agents never merge.' \
+            "$ISSUE_NUMBER" "$EXPLANATION")
+
+          # Create if absent; skip silently if already exists.
+          gh pr view "$BRANCH" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 || \
+            gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "feat: agent codegen for issue #${ISSUE_NUMBER}" \
+              --body "$PR_BODY" \
+              --draft \
+              --repo "$GITHUB_REPOSITORY"
