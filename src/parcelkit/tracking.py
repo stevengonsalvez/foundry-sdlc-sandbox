@@ -12,10 +12,9 @@ Check-digit algorithm (Luhn-like mod-10 over the 8 digit body):
     3. The provided check character (position 10) must equal str(check_digit).
 
 Gaps:
-  * KNOWN GAP 2: if the numeric body contains all zeros ("00000000") the algorithm
-    produces check digit 0, but is_valid_tracking_number returns False because the
-    all-zero body is not rejected explicitly. Callers providing "AB00000000" + correct
-    check + "GB" will get True, which may be undesirable for placeholder numbers.
+  * KNOWN GAP 2: an all-zero numeric body ("00000000") has check digit 0, and nothing
+    rejects it, so is_valid_tracking_number("AB000000000GB") returns True. That may be
+    undesirable for placeholder numbers.
     (Demo issue: add an all-zeros guard.)
 """
 

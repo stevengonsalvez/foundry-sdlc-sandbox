@@ -18,6 +18,10 @@ Safety rules (validated before writing anything):
     - No existing component may be a symlink; resolved path must stay inside the repo root
     - 1 to 20 files, each entry exactly {path, content}
     - Maximum 200 KB per file content (as UTF-8 bytes)
+    - An existing file under tests/ may not lose any `def test_` name or shrink below 70%
+      of its current line count
+    - Every destination is pre-flighted (no parent component is a non-directory, the target
+      is not a directory, no batch path is the parent of another) before the first write
 
 On any violation the script exits non-zero and writes a clear message to stderr.
 Nothing is written until all files pass validation.
@@ -33,6 +37,9 @@ from pathlib import PurePosixPath
 
 MAX_FILES = 20
 MAX_FILE_BYTES = 200 * 1024  # 200 KB
+MIN_TEST_FILE_LINE_RATIO = 0.7  # a rewritten test file may not shrink below this share
+
+_TEST_DEF_RE = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(test_\w*)", re.MULTILINE)
 
 # Only these roots may be written.
 ALLOWED_ROOTS = ("src/", "tests/", "docs/")
@@ -115,6 +122,29 @@ def _validate_content(path: str, content: str) -> None:
         )
 
 
+def _assert_test_file_not_gutted(norm: str, content: str, repo_root: str) -> None:
+    """Mechanical guard: the model may add tests to an existing test file, not drop them."""
+    if not norm.startswith("tests/"):
+        return
+    existing_path = os.path.join(repo_root, norm)
+    if not os.path.isfile(existing_path):
+        return
+    with open(existing_path, encoding="utf-8", errors="replace") as fh:
+        existing = fh.read()
+    dropped = set(_TEST_DEF_RE.findall(existing)) - set(_TEST_DEF_RE.findall(content))
+    if dropped:
+        raise ValueError(
+            f"{norm!r} would drop existing test(s): {', '.join(sorted(dropped))}. "
+            "Return the full file with all existing tests kept."
+        )
+    old_lines, new_lines = len(existing.splitlines()), len(content.splitlines())
+    if new_lines < old_lines * MIN_TEST_FILE_LINE_RATIO:
+        raise ValueError(
+            f"{norm!r} would shrink from {old_lines} to {new_lines} lines "
+            f"(below {MIN_TEST_FILE_LINE_RATIO:.0%} of the existing file)"
+        )
+
+
 def load_and_validate(json_path: str, repo_root: str = ".") -> list[dict]:
     """Load and fully validate a codegen JSON file. Returns the files list with
     each entry augmented by a 'norm_path' key (the normalised POSIX path)."""
@@ -147,12 +177,36 @@ def load_and_validate(json_path: str, repo_root: str = ".") -> list[dict]:
         content = entry["content"]
         norm = _validate_path(path, repo_root)
         _validate_content(path, content)
+        _assert_test_file_not_gutted(norm, content, repo_root)
         if norm.lower() in seen:
             raise ValueError(f"Duplicate path {path!r} (normalised: {norm!r})")
         seen.add(norm.lower())
         validated.append({"path": path, "norm_path": norm, "content": content})
 
     return validated
+
+
+def _assert_writable(norm: str, root: str) -> None:
+    """Reject a destination that makedirs/open would fail on halfway through a batch."""
+    cur = root
+    for part in norm.split("/")[:-1]:
+        cur = os.path.join(cur, part)
+        if not os.path.lexists(cur):
+            return  # nothing below a missing directory can conflict
+        if not os.path.isdir(cur):
+            raise ValueError(f"Path {norm!r}: parent {os.path.relpath(cur, root)!r} is not a directory")
+    if os.path.isdir(os.path.join(root, norm)):
+        raise ValueError(f"Path {norm!r} is an existing directory, cannot write a file there")
+
+
+def _assert_no_file_dir_clash(norms: list[str]) -> None:
+    """Reject a batch where one path is a file and another path needs it to be a directory."""
+    lowered = {n.lower() for n in norms}
+    for n in sorted(lowered):
+        parts = n.split("/")
+        for i in range(1, len(parts)):
+            if "/".join(parts[:i]) in lowered:
+                raise ValueError(f"Batch writes {'/'.join(parts[:i])!r} as a file and also under it: {n!r}")
 
 
 def apply_files(files: list[dict], root: str = ".") -> list[str]:
@@ -163,8 +217,10 @@ def apply_files(files: list[dict], root: str = ".") -> list[str]:
     Returns the list of normalised paths written.
     """
     # Pre-flight every path before the first write so a bad one cannot leave a partial tree.
+    _assert_no_file_dir_clash([entry["norm_path"] for entry in files])
     for entry in files:
         _assert_no_symlinks(entry["norm_path"], root)
+        _assert_writable(entry["norm_path"], root)
     written: list[str] = []
     for entry in files:
         norm = entry["norm_path"]

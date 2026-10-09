@@ -356,3 +356,96 @@ class TestSymlinksAndShape:
             load_and_validate(_write_json(tmp_path, data), str(tmp_path))
         assert not (tmp_path / "src" / "ok.py").exists()
         assert not (tmp_path / ".git" / "config").exists()
+
+
+EXISTING_TESTS = (
+    "import pytest\n\n\n"
+    "def test_one():\n    assert 1\n\n\n"
+    "def test_two():\n    assert 2\n\n\n"
+    "async def test_three():\n    assert 3\n"
+)
+
+
+def _repo_with_test_file(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text(EXISTING_TESTS, encoding="utf-8")
+    return tmp_path
+
+
+def _validate_one(tmp_path, path, content):
+    data = {"files": [{"path": path, "content": content}]}
+    return load_and_validate(_write_json(tmp_path, data), str(tmp_path))
+
+
+class TestExistingTestFileGuard:
+    def test_dropping_a_test_is_rejected(self, tmp_path):
+        repo = _repo_with_test_file(tmp_path)
+        gutted = EXISTING_TESTS.replace("def test_two", "def helper_two")
+        with pytest.raises(ValueError, match="test_two"):
+            _validate_one(repo, "tests/test_x.py", gutted)
+
+    def test_shrinking_below_70_percent_is_rejected(self, tmp_path):
+        repo = _repo_with_test_file(tmp_path)
+        names_only = "def test_one(): pass\ndef test_two(): pass\nasync def test_three(): pass\n"
+        with pytest.raises(ValueError, match="shrink"):
+            _validate_one(repo, "tests/test_x.py", names_only)
+
+    def test_keeping_all_tests_and_adding_one_is_accepted(self, tmp_path):
+        repo = _repo_with_test_file(tmp_path)
+        grown = EXISTING_TESTS + "\n\ndef test_four():\n    assert 4\n"
+        assert _validate_one(repo, "tests/test_x.py", grown)[0]["norm_path"] == "tests/test_x.py"
+
+    def test_new_test_file_is_not_guarded(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        assert _validate_one(tmp_path, "tests/test_new.py", "def test_a(): pass\n")
+
+    def test_non_test_dirs_are_not_guarded(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "m.py").write_text("def test_like():\n    pass\n" * 10, encoding="utf-8")
+        assert _validate_one(tmp_path, "src/m.py", "x = 1\n")
+
+    def test_gutted_test_file_rejects_whole_batch_and_leaves_tree_unchanged(self, tmp_path):
+        repo = _repo_with_test_file(tmp_path)
+        json_path = _write_json(repo, {"files": [
+            {"path": "src/new.py", "content": "x = 1\n"},
+            {"path": "tests/test_x.py", "content": "def test_one(): pass\n"},
+        ]})
+        # main() resolves the repo from the script location, so drive its two steps directly.
+        with pytest.raises(ValueError):
+            apply_files(load_and_validate(json_path, str(repo)), str(repo))
+        assert (repo / "tests" / "test_x.py").read_text(encoding="utf-8") == EXISTING_TESTS
+        assert not (repo / "src" / "new.py").exists()
+
+
+class TestApplyFilesPreflight:
+    def test_parent_that_is_a_regular_file_writes_nothing(self, tmp_path):
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "README.md").write_text("keep", encoding="utf-8")
+        files = [
+            {"path": "src/a.py", "norm_path": "src/a.py", "content": "x"},
+            {"path": "docs/README.md/x.md", "norm_path": "docs/README.md/x.md", "content": "y"},
+        ]
+        with pytest.raises(ValueError, match="not a directory"):
+            apply_files(files, root=str(tmp_path))
+        assert not (tmp_path / "src").exists()
+        assert (tmp_path / "docs" / "README.md").read_text(encoding="utf-8") == "keep"
+
+    def test_target_that_is_a_directory_writes_nothing(self, tmp_path):
+        (tmp_path / "docs" / "guide.md").mkdir(parents=True)
+        files = [
+            {"path": "src/a.py", "norm_path": "src/a.py", "content": "x"},
+            {"path": "docs/guide.md", "norm_path": "docs/guide.md", "content": "y"},
+        ]
+        with pytest.raises(ValueError, match="existing directory"):
+            apply_files(files, root=str(tmp_path))
+        assert not (tmp_path / "src").exists()
+
+    def test_batch_path_that_is_parent_of_another_writes_nothing(self, tmp_path):
+        files = [
+            {"path": "src/a.py", "norm_path": "src/a.py", "content": "x"},
+            {"path": "docs/n", "norm_path": "docs/n", "content": "y"},
+            {"path": "docs/n/x.md", "norm_path": "docs/n/x.md", "content": "z"},
+        ]
+        with pytest.raises(ValueError, match="also under it"):
+            apply_files(files, root=str(tmp_path))
+        assert not (tmp_path / "src").exists()

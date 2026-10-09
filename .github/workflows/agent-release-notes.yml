@@ -72,8 +72,10 @@ jobs:
           echo "Range: ${PREV_TAG}..${CURRENT_TAG}"
 
           # Commits in range (end-of-options to guard against tag-as-option).
-          RANGE_COMMITS=$(git log --oneline --end-of-options "${PREV_TAG}..${CURRENT_TAG}" \
-            | head -c 4096)
+          # To a file first: piping into head makes git die of SIGPIPE (141) under pipefail.
+          git log --oneline --end-of-options "${PREV_TAG}..${CURRENT_TAG}" \
+            > "$RUNNER_TEMP/range_commits_full.txt"
+          RANGE_COMMITS=$(head -c 4096 "$RUNNER_TEMP/range_commits_full.txt")
 
           # Merged PRs filtered to those whose mergedAt falls in the tag date range.
           TAG_DATE=$(git log -1 --format="%aI" "${CURRENT_TAG}" 2>/dev/null || echo "")

@@ -21,7 +21,8 @@ Guards:
 - response.status must be 'completed' and output_text non-empty or exit non-zero.
 - JSON-output agents: schema validated, extra keys rejected, duplicate JSON keys rejected.
 - codegen: allowlist path normalisation, 20-file cap, 200k content cap, unique paths.
-- Markdown agents: images, raw HTML stripped; @mentions and 'Fixes #' defanged.
+- Markdown agents, triage text and codegen explanation: images, tag-shaped HTML stripped
+  (code spans/fences kept); @mentions and 'Fixes #' / 'GH-N' defanged.
 """
 
 from __future__ import annotations
@@ -255,37 +256,76 @@ VALIDATORS["sdlc-codegen"] = _validate_codegen
 # Markdown output sanitisation
 # ---------------------------------------------------------------------------
 
-# Inline images and reference-style images (![alt][ref] / ![alt]): both can beacon to an
-# attacker host when rendered.
-_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\](?:\([^)]*\)|\[[^\]]*\])?")
-_HTML_TAG_RE = re.compile(r"<[^>]{0,200}>", re.DOTALL)
-_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+# One leftmost-first scan, like CommonMark: fenced code, inline code spans, HTML comments,
+# CDATA, tag-shaped tokens (including <!...> and <?...>) and markdown images compete by
+# position, so a tag that contains a backtick is stripped as a tag, while generics/comparisons
+# inside real code survive untouched. Comments and CDATA that never close run to end of text,
+# the way a renderer swallows the rest of the document.
+# Images cover inline and reference style (![alt][ref] / ![alt]): both can beacon when rendered.
+# An opening backtick preceded by a backslash is a literal, so it never starts a code span.
+_NON_CODE_MARKUP = (
+    r"(?P<comment><!--.*?(?:-->|\Z))"
+    r"|(?P<cdata><!\[CDATA\[.*?(?:\]\]>|\Z))"
+    r"|(?P<tag><[A-Za-z/!?][^>]{0,200}>)"
+    r"|(?P<image>!\[[^\]]*\](?:\([^)]*\)|\[[^\]]*\])?)"
+)
+_CODE_MARKUP = (
+    r"(?P<code>"
+    r"^[ ]{0,3}(?P<bt>`{3,})[^`\n]*\n.*?(?:^[ ]{0,3}(?P=bt)`*[ \t]*$|\Z)"
+    r"|^[ ]{0,3}(?P<tl>~{3,})[^\n]*\n.*?(?:^[ ]{0,3}(?P=tl)~*[ \t]*$|\Z)"
+    r"|(?<![\\`])(?P<ticks>`+)(?!`)(?:(?!\n[ \t]*\n).)+?(?<!`)(?P=ticks)(?!`)"
+    r")|"
+)
+_MARKUP_RE = re.compile(_CODE_MARKUP + _NON_CODE_MARKUP, re.DOTALL | re.MULTILINE)
+_MARKUP_NO_CODE_RE = re.compile(_NON_CODE_MARKUP, re.DOTALL)
+# CommonMark HTML-block starts (<?, <!, <![CDATA[) can swallow following text, including the
+# closing of a code fence, so code cannot be trusted to be code once one is present.
+_HTML_BLOCK_START_RE = re.compile(r"<[?!]")
 _MENTION_RE = re.compile(r"(?<!\w)@([\w/-]+)")
-# GitHub closing keywords (close/fix/resolve + s/d forms) followed by #N, owner/repo#N or a URL.
+# GitHub closing keywords (close/fix/resolve + s/d forms) followed by #N, owner/repo#N, GH-N or a URL.
 _FIXES_RE = re.compile(
-    r"\b((?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:https?://\S+|[\w./-]*#\d+))",
+    r"\b((?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:https?://\S+|[\w./-]*#\d+|GH-\d+))",
     re.IGNORECASE,
 )
+
+
+def _strip_markup(match: re.Match[str]) -> str:
+    if match.groupdict().get("code"):
+        return match.group(0)
+    return "[image removed]" if match.group("image") else ""
 
 
 def _sanitise_markdown(text: str) -> str:
     """
     Strip or neutralise markdown images, raw HTML, @mentions,
     and 'Fixes #NN' keywords from agent output before posting to GitHub.
+    Code blocks and code spans are left intact (they render literally), unless the text
+    contains an HTML-block start (<? or <!): then nothing is trusted as code and every
+    remaining '<' is escaped.
     """
+    untrusted_code = False
     # Strip to a fixed point: removing one construct can splice the pieces of another
     # together (e.g. "!<b>[a](http://x)" becomes an image once the tag is gone).
     for _ in range(8):
-        stripped = _HTML_COMMENT_RE.sub("", text)
-        stripped = _HTML_TAG_RE.sub("", stripped)
-        stripped = _MD_IMAGE_RE.sub("[image removed]", stripped)
+        untrusted_code = untrusted_code or bool(_HTML_BLOCK_START_RE.search(text))
+        pattern = _MARKUP_NO_CODE_RE if untrusted_code else _MARKUP_RE
+        stripped = pattern.sub(_strip_markup, text)
         if stripped == text:
             break
         text = stripped
+    if untrusted_code or _HTML_BLOCK_START_RE.search(text):
+        text = text.replace("<", "&lt;")
     text = _MENTION_RE.sub(r"`@\1`", text)
     # Backticks put the keyword in a code span, where GitHub does not parse closing keywords.
     text = _FIXES_RE.sub(lambda m: f"`{m.group(1)}` [keyword defanged]", text)
     return text
+
+
+def _sanitise_triage(data: dict) -> None:
+    """Sanitise every free-text field of a validated triage result (labels are allow-listed)."""
+    data["summary"] = _sanitise_markdown(data["summary"])
+    data["acceptance_criteria"] = [_sanitise_markdown(s) for s in data["acceptance_criteria"]]
+    data["tasks"] = [_sanitise_markdown(s) for s in data["tasks"]]
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +577,9 @@ def main(argv: list[str] | None = None) -> None:
         if args.agent == "sdlc-codegen":
             # The explanation lands in a PR body, so it gets the markdown treatment too.
             data["explanation"] = _sanitise_markdown(data["explanation"])
+        elif args.agent == "sdlc-triage":
+            # Triage text lands in an issue comment.
+            _sanitise_triage(data)
         # Emit the validated, normalised object (codegen paths are canonical), not raw model text.
         text = json.dumps(data, ensure_ascii=False)
 

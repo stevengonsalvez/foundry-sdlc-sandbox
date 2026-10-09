@@ -61,13 +61,14 @@ jobs:
           # Repo context: the agent cannot see the checkout, so hand it the
           # existing source and tests (capped) and require exact existing paths.
           import pathlib
-          ctx, used, cap = [], 0, 40000
+          ctx, omitted, used, cap = [], [], 0, 40000
           for root in ("src", "tests"):
               for f in sorted(pathlib.Path(root).rglob("*.py")):
                   if f.is_symlink() or not f.is_file():
                       continue
                   text = f.read_text(encoding="utf-8", errors="replace")
                   if used + len(text) > cap:
+                      omitted.append(f.as_posix())
                       continue
                   used += len(text)
                   ctx.append(f"--- FILE {f.as_posix()} ---\n{text}")
@@ -77,6 +78,9 @@ jobs:
               "existing tests and add new ones. Only paths under src/, tests/, docs/ are allowed."
           )
           prompt = f"Issue #{issue_num}: {title}\n\n{body}\n\n{rules}\n\nEXISTING FILES:\n" + "\n".join(ctx)
+          if omitted:
+              # Without this the model cannot tell "file absent" from "file cut for size".
+              prompt += "\nFiles NOT shown (do not modify them): " + ", ".join(omitted) + "\n"
           with open(f"{os.environ['RUNNER_TEMP']}/prompt.txt", "w", encoding="utf-8") as fh:
               fh.write(prompt)
           PYEOF
@@ -160,7 +164,17 @@ jobs:
             git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
               commit -m "feat: agent codegen for issue #${ISSUE_NUMBER}"
 
-          git push origin "$BRANCH" --force-with-lease || git push origin "$BRANCH" --force
+          # The branch is rebuilt from main on every run, so an existing remote branch must be
+          # overwritten, but only if it is still the exact tip seen now. Never a plain --force.
+          REMOTE_REF=$(git ls-remote --heads origin "refs/heads/${BRANCH}")
+          REMOTE_SHA="${REMOTE_REF%%[[:space:]]*}"
+          if [ -z "$REMOTE_SHA" ]; then
+            git push origin "$BRANCH"
+          elif ! git push origin "$BRANCH" --force-with-lease="refs/heads/${BRANCH}:${REMOTE_SHA}"; then
+            echo "ERROR: ${BRANCH} on origin moved since ${REMOTE_SHA}; refusing to overwrite it." >&2
+            echo "Inspect the branch, then re-run by removing and re-adding the agent:implement label." >&2
+            exit 1
+          fi
 
       - name: Open or update draft PR
         env:
@@ -168,7 +182,8 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           BRANCH="agent/issue-${ISSUE_NUMBER}"
-          EXPLANATION=$(jq -r '.explanation // ""' "$RUNNER_TEMP/codegen_output.json" | head -c 1000)
+          jq -r '.explanation // ""' "$RUNNER_TEMP/codegen_output.json" > "$RUNNER_TEMP/explanation_full.txt"
+          EXPLANATION=$(head -c 1000 "$RUNNER_TEMP/explanation_full.txt")
           PR_BODY=$(printf 'Closes #%s\n\nAgent explanation:\n%s\n\n> [!NOTE]\n> Opened by sdlc-codegen. CI and review start only after the owner closes and reopens this PR. Agents never merge.' \
             "$ISSUE_NUMBER" "$EXPLANATION")
 

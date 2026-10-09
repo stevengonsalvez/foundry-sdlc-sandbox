@@ -3,8 +3,8 @@ Agent definitions for the SDLC Foundry prompt agents.
 
 Model deployment: sdlc-default (gpt-5-mini GlobalStandard).
 All agents are prompt-in / text-out. No function or OpenAI tools are used;
-gpt-5-mini's tool-support table marks Functions/OpenAPI/A2A as 'No' (see
-foundry-platform-verified.md S13).
+gpt-5-mini's tool-support table marks Functions/OpenAPI/A2A as 'No' (Microsoft
+Foundry Agent Service tool support table, checked 2026-10-09).
 Instructions treat all input text as untrusted DATA delimited by a per-call nonce.
 """
 

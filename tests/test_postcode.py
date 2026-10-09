@@ -62,9 +62,7 @@ class TestIsValidPostcode:
         assert is_valid_postcode("sw1a1aa") is True
 
     def test_demo_gap_1_noted(self):
-        # KNOWN GAP 1: The module docstring mentions that callers may be surprised
-        # the library handles lowercase/no-space input via normalise_postcode.
-        # The gap is that a postcode like "sw1a 1aa" (lowercase with space) also works.
+        # Lowercase input with a space is handled too (normalise_postcode upper-cases).
         assert is_valid_postcode("sw1a 1aa") is True
 
 

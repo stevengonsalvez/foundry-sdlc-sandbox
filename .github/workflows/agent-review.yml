@@ -61,7 +61,9 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           # Three-dot diff: changes on HEAD relative to the merge base (avoids base drift).
-          git diff "${BASE_SHA}...${HEAD_SHA}" | head -c 12288 > "$RUNNER_TEMP/pr_diff.txt"
+          # Full diff to a file first: piping into head makes git die of SIGPIPE (141) under pipefail.
+          git diff "${BASE_SHA}...${HEAD_SHA}" > "$RUNNER_TEMP/pr_diff_full.txt"
+          head -c 12288 "$RUNNER_TEMP/pr_diff_full.txt" > "$RUNNER_TEMP/pr_diff.txt"
           echo "Diff size: $(wc -c < "$RUNNER_TEMP/pr_diff.txt") bytes"
 
       - name: Build prompt file
