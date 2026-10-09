@@ -172,8 +172,9 @@ jobs:
           PR_BODY=$(printf 'Closes #%s\n\nAgent explanation:\n%s\n\n> [!NOTE]\n> Opened by sdlc-codegen. CI and review start only after the owner closes and reopens this PR. Agents never merge.' \
             "$ISSUE_NUMBER" "$EXPLANATION")
 
-          # Create if absent; skip silently if already exists.
-          gh pr view "$BRANCH" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 || \
+          # Create only if there is no OPEN PR for this branch (a closed one must not block).
+          OPEN=$(gh pr list --head "$BRANCH" --state open --repo "$GITHUB_REPOSITORY" --json number --jq 'length')
+          [ "$OPEN" != "0" ] || \
             gh pr create \
               --base main \
               --head "$BRANCH" \
