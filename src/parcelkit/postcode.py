@@ -31,14 +31,19 @@ def normalise_postcode(raw: str) -> str:
     Raises ValueError for clearly invalid input (wrong length after stripping).
     Does not validate the shape; use is_valid_postcode for that.
     """
+    # Strip surrounding whitespace then collapse any internal whitespace so inputs like
+    # " sw1a  1aa " or "sw1a1aa" are handled uniformly.
     stripped = raw.strip()
-    if len(stripped) < 5 or len(stripped) > 8:
+    # Collapse all whitespace characters to nothing so we can re-insert a single space
+    # before the inward code.
+    compact = re.sub(r"\s+", "", stripped)
+    if len(compact) < 5 or len(compact) > 7:
+        # UK postcodes without space are between 5 and 7 chars; with space they'd be 6-8.
         raise ValueError(f"Postcode length out of range: {raw!r}")
-    upper = stripped.upper()
-    # Insert space before the last 3 characters if none present.
-    if " " not in upper:
-        upper = upper[:-3] + " " + upper[-3:]
-    return upper
+    upper = compact.upper()
+    # Insert single space before the last 3 characters.
+    normalised = upper[:-3] + " " + upper[-3:]
+    return normalised
 
 
 def is_valid_postcode(raw: str) -> bool:
