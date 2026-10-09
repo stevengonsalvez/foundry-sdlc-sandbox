@@ -58,7 +58,25 @@ jobs:
           title = os.environ.get("ISSUE_TITLE", "")[:500]
           body = os.environ.get("ISSUE_BODY", "")[:3000]
           issue_num = os.environ.get("ISSUE_NUMBER", "")
-          prompt = f"Issue #{issue_num}: {title}\n\n{body}"
+          # Repo context: the agent cannot see the checkout, so hand it the
+          # existing source and tests (capped) and require exact existing paths.
+          import pathlib
+          ctx, used, cap = [], 0, 40000
+          for root in ("src", "tests"):
+              for f in sorted(pathlib.Path(root).rglob("*.py")):
+                  if f.is_symlink() or not f.is_file():
+                      continue
+                  text = f.read_text(encoding="utf-8", errors="replace")
+                  if used + len(text) > cap:
+                      continue
+                  used += len(text)
+                  ctx.append(f"--- FILE {f.as_posix()} ---\n{text}")
+          rules = (
+              "Rules: change existing files by returning their FULL new content at the exact "
+              "existing path listed below. Never replace a test file with fewer tests; keep all "
+              "existing tests and add new ones. Only paths under src/, tests/, docs/ are allowed."
+          )
+          prompt = f"Issue #{issue_num}: {title}\n\n{body}\n\n{rules}\n\nEXISTING FILES:\n" + "\n".join(ctx)
           with open(f"{os.environ['RUNNER_TEMP']}/prompt.txt", "w", encoding="utf-8") as fh:
               fh.write(prompt)
           PYEOF
